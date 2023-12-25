@@ -4,19 +4,46 @@ import torch.optim as optim
 from torchvision import transforms, models
 from PIL import Image
 import matplotlib.pyplot as plt
-import cv2
-from torchvision import transforms
-from PIL import Image
+import torch.nn.functional as F
 import tkinter as tk
 from tkinter import filedialog
 import copy
+from torchvision.models import vgg19, VGG19_Weights
+import numpy as np
+
+
+class ContentLoss(nn.Module):
+    def __init__(self, target):
+        super(ContentLoss, self).__init__()
+        self.target = target.detach()  # this is a constant, not a variable
+        self.loss = F.mse_loss(self.target, self.target)  # to initialize with something
+
+    def forward(self, input):
+        self.loss = F.mse_loss(input, self.target)
+        return input
+
+class StyleLoss(nn.Module):
+    def __init__(self, target_feature):
+        super(StyleLoss, self).__init__()
+        self.target = gram_matrix(target_feature).detach()
+        self.loss = F.mse_loss(self.target, self.target)  # to initialize with something
+
+    def forward(self, input):
+        G = gram_matrix(input)
+        self.loss = F.mse_loss(G, self.target)
+        return input
+
+def gram_matrix(input):
+    a, b, c, d = input.size()
+    features = input.view(a * b, c * d)
+    G = torch.mm(features, features.t())
+    return G.div(a * b * c * d)
 
 class Normalization(nn.Module):
     def __init__(self, mean, std):
         super(Normalization, self).__init__()
-        # .view() is used to reshape the tensor to match the shape of the input tensor
-        self.mean = torch.tensor(mean).view(-1, 1, 1)
-        self.std = torch.tensor(std).view(-1, 1, 1)
+        self.mean = mean.clone().detach().view(-1, 1, 1)
+        self.std = std.clone().detach().view(-1, 1, 1)
 
     def forward(self, img):
         # Normalize the image
@@ -41,7 +68,7 @@ def image_loader(image_path, device, imsize=512):
     return image.to(device, torch.float)
 
 # Function to load pre-trained VGG19 model
-def get_style_model_and_losses(cnn, normalization_mean, normalization_std, style_img, content_img):
+def get_style_model_and_losses(cnn, cnn_normalization_mean, cnn_normalization_std, style_img, content_img, device):
     """
     Constructs a style transfer model with content and style losses.
 
@@ -58,7 +85,7 @@ def get_style_model_and_losses(cnn, normalization_mean, normalization_std, style
     cnn = copy.deepcopy(cnn)
 
     # normalization module
-    normalization = Normalization(normalization_mean, normalization_std).to(device)
+    normalization = Normalization(cnn_normalization_mean, cnn_normalization_std).to(device)
 
     # Just in case we want to use average pooling instead of max pooling
     for i, layer in enumerate(cnn):
@@ -114,10 +141,10 @@ def get_style_model_and_losses(cnn, normalization_mean, normalization_std, style
     return model, style_losses, content_losses
 
 # Function to perform style transfer
-def run_style_transfer(cnn, normalization_mean, normalization_std, content_img, style_img, input_img, num_steps=300, style_weight=1000000, content_weight=1):
+def run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std, content_img, style_img, input_img, device, num_steps=300, style_weight=1000000, content_weight=1):
     """Run the style transfer."""
     print('Building the style transfer model..')
-    model, style_losses, content_losses = get_style_model_and_losses(cnn, normalization_mean, normalization_std, style_img, content_img)
+    model, style_losses, content_losses = get_style_model_and_losses(cnn, cnn_normalization_mean, cnn_normalization_std, style_img, content_img, device)
     
     # We will use L-BFGS algorithm to optimize. The .backward method dynamically computes gradients
     optimizer = optim.LBFGS([input_img.requires_grad_()])
@@ -161,41 +188,73 @@ def run_style_transfer(cnn, normalization_mean, normalization_std, content_img, 
 
     return input_img
 
-# Main function
+
+# Function to display tensor as image
+def imshow(tensor, title=None):
+    unloader = transforms.ToPILImage()  # reconvert into PIL image
+    image = tensor.cpu().clone()  # clone the tensor to not do changes on it
+    image = image.squeeze(0)      # remove the fake batch dimension
+    image = unloader(image)
+    plt.imshow(image)
+    if title is not None:
+        plt.title(title)
+    plt.pause(0.001)  # pause a bit so that plots are updated
+
+
+# Define content and style layers
+# Content layer where we will put our content loss 
+content_layers = ['conv_4']  # can change as per your choice
+
+# Style layers where we will put our style loss
+style_layers = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']  # can change as per your choice
+
+
 def main(content_path, style_path):
+    # Set the device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Desired size of output image
-    imsize = 512 if torch.cuda.is_available() else 128
-
-    loader = transforms.Compose([
-        transforms.Resize(imsize),
-        transforms.ToTensor()
-    ])
-
-    # Load VGG19
-    weights = VGG19_Weights.DEFAULT
-    cnn = vgg19(weights=weights).features.to(device).eval()
-
-    # VGG networks are trained on images with each channel normalized
+    # Define the normalization mean and std
     cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
     cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
 
-    # Load images
-    content_img = image_loader(content_path, device)
-    style_img = image_loader(style_path, device)
+    # Load the VGG19 model
+    cnn = models.vgg19(pretrained=True).features.to(device).eval()
 
-    # Perform style transfer
+    # User input for customizing parameters
+    try:
+        imsize = int(input("Enter the desired size of output image (default 512): ") or 512)
+        num_steps = int(input("Enter the number of steps for style transfer (default 300): ") or 300)
+        style_weight = float(input("Enter the style weight (default 1000000): ") or 1000000)
+        content_weight = float(input("Enter the content weight (default 1): ") or 1)
+    except ValueError as e:
+        print(f"Invalid input: {e}. Using default values.")
+        imsize = 512
+        num_steps = 300
+        style_weight = 1000000
+        content_weight = 1
+
+    # Load the content and style images
+    content_img = image_loader(content_path, device, imsize)
+    style_img = image_loader(style_path, device, imsize)
+
+    # Optionally add a prompt for the user to enter input and output paths
+    # input_path = input("Enter the path to the input image: ")
+    # style_path = input("Enter the path to the style image: ")
+
+    # Perform the style transfer
     input_img = content_img.clone()
-    output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std, content_img, style_img, input_img)
+    output = run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std, 
+                                content_img, style_img, input_img, 
+                                device, num_steps, style_weight, content_weight)
 
-    # Display or save output
+    # Show the output image
     plt.figure()
     imshow(output, title='Output Image')
     plt.ioff()
     plt.show()
 
 if __name__ == "__main__":
+    # Ask the user for the paths to the input and style images
     print("Select the content (target) image")
     content_path = select_file()
     print("Select the style (transferer) image")
