@@ -174,7 +174,8 @@ def main(content_path, style_path):
     ])
 
     # Load VGG19
-    cnn = models.vgg19(pretrained=True).features.to(device).eval()
+    weights = VGG19_Weights.DEFAULT
+    cnn = vgg19(weights=weights).features.to(device).eval()
 
     # VGG networks are trained on images with each channel normalized
     cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
