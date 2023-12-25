@@ -9,6 +9,18 @@ from torchvision import transforms
 from PIL import Image
 import tkinter as tk
 from tkinter import filedialog
+import copy
+
+class Normalization(nn.Module):
+    def __init__(self, mean, std):
+        super(Normalization, self).__init__()
+        # .view() is used to reshape the tensor to match the shape of the input tensor
+        self.mean = torch.tensor(mean).view(-1, 1, 1)
+        self.std = torch.tensor(std).view(-1, 1, 1)
+
+    def forward(self, img):
+        # Normalize the image
+        return (img - self.mean) / self.std
 
 # Function to open a file dialog and return selected file path
 def select_file():
@@ -17,20 +29,32 @@ def select_file():
     file_path = filedialog.askopenfilename()  # Show file dialog
     return file_path
 
-def image_loader(image_path, imsize=512):
-    # Define transformations for image
+# Modify the image_loader function to take device as a parameter
+def image_loader(image_path, device, imsize=512):
     loader = transforms.Compose([
-        transforms.Resize(imsize),  # Scale imported image
+        transforms.Resize(imsize),
         transforms.CenterCrop(imsize),
-        transforms.ToTensor()])     # Transform it into a torch tensor
-
+        transforms.ToTensor()])
+    
     image = Image.open(image_path).convert('RGB')
-    # Fake batch dimension required to fit network's input dimensions
     image = loader(image).unsqueeze(0)
     return image.to(device, torch.float)
 
 # Function to load pre-trained VGG19 model
 def get_style_model_and_losses(cnn, normalization_mean, normalization_std, style_img, content_img):
+    """
+    Constructs a style transfer model with content and style losses.
+
+    Args:
+        cnn (torch.nn.Module): The pre-trained CNN model.
+        normalization_mean (torch.Tensor): The mean values for normalization.
+        normalization_std (torch.Tensor): The standard deviation values for normalization.
+        style_img (torch.Tensor): The style image.
+        content_img (torch.Tensor): The content image.
+
+    Returns:
+        tuple: A tuple containing the style transfer model, style losses, and content losses.
+    """
     cnn = copy.deepcopy(cnn)
 
     # normalization module
@@ -157,8 +181,8 @@ def main(content_path, style_path):
     cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
 
     # Load images
-    content_img = image_loader(content_path)
-    style_img = image_loader(style_path)
+    content_img = image_loader(content_path, device)
+    style_img = image_loader(style_path, device)
 
     # Perform style transfer
     input_img = content_img.clone()
