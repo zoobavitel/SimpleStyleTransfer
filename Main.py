@@ -10,43 +10,114 @@ from tkinter import filedialog
 import copy
 from torchvision.models import vgg19, VGG19_Weights
 import numpy as np
-
+from torch.optim import Adam
 
 class ContentLoss(nn.Module):
+    """
+    A module that computes the content loss between the input and a target.
+
+    Args:
+        target (torch.Tensor): The target content feature map.
+
+    Attributes:
+        target (torch.Tensor): The target content feature map.
+        loss (torch.Tensor): The current content loss value.
+
+    Methods:
+        forward(input): Computes the content loss between the input and the target.
+
+    """
+
     def __init__(self, target):
         super(ContentLoss, self).__init__()
         self.target = target.detach()  # this is a constant, not a variable
         self.loss = F.mse_loss(self.target, self.target)  # to initialize with something
 
     def forward(self, input):
+        """
+        Computes the content loss between the input and the target.
+
+        Args:
+            input (torch.Tensor): The input content feature map.
+
+        Returns:
+            torch.Tensor: The input content feature map.
+
+        """
         self.loss = F.mse_loss(input, self.target)
         return input
 
 class StyleLoss(nn.Module):
     def __init__(self, target_feature):
+        """
+        StyleLoss module calculates the style loss between the input feature and the target feature.
+
+        Args:
+            target_feature (torch.Tensor): The target feature to compare with.
+
+        Attributes:
+            target (torch.Tensor): The gram matrix of the target feature.
+            loss (torch.Tensor): The style loss value.
+
+        """
         super(StyleLoss, self).__init__()
         self.target = gram_matrix(target_feature).detach()
         self.loss = F.mse_loss(self.target, self.target)  # to initialize with something
 
     def forward(self, input):
+        """
+        Calculates the style loss between the input feature and the target feature.
+
+        Args:
+            input (torch.Tensor): The input feature to compare with the target feature.
+
+        Returns:
+            torch.Tensor: The input feature.
+
+        """
         G = gram_matrix(input)
         self.loss = F.mse_loss(G, self.target)
         return input
 
 def gram_matrix(input):
+    """
+    Calculate the Gram matrix of the input tensor.
+
+    Args:
+        input (torch.Tensor): Input tensor of shape (batch_size, channels, height, width).
+
+    Returns:
+        torch.Tensor: Gram matrix of the input tensor.
+    """
     a, b, c, d = input.size()
     features = input.view(a * b, c * d)
     G = torch.mm(features, features.t())
     return G.div(a * b * c * d)
 
 class Normalization(nn.Module):
+    """
+    A module for normalizing an image tensor.
+
+    Args:
+        mean (torch.Tensor): The mean values for normalization.
+        std (torch.Tensor): The standard deviation values for normalization.
+    """
+
     def __init__(self, mean, std):
         super(Normalization, self).__init__()
         self.mean = mean.clone().detach().view(-1, 1, 1)
         self.std = std.clone().detach().view(-1, 1, 1)
 
     def forward(self, img):
-        # Normalize the image
+        """
+        Normalize the input image tensor.
+
+        Args:
+            img (torch.Tensor): The input image tensor.
+
+        Returns:
+            torch.Tensor: The normalized image tensor.
+        """
         return (img - self.mean) / self.std
 
 # Function to open a file dialog and return selected file path
@@ -142,51 +213,32 @@ def get_style_model_and_losses(cnn, cnn_normalization_mean, cnn_normalization_st
 
 # Function to perform style transfer
 def run_style_transfer(cnn, cnn_normalization_mean, cnn_normalization_std, content_img, style_img, input_img, device, num_steps=300, style_weight=1000000, content_weight=1):
-    """Run the style transfer."""
     print('Building the style transfer model..')
     model, style_losses, content_losses = get_style_model_and_losses(cnn, cnn_normalization_mean, cnn_normalization_std, style_img, content_img, device)
     
-    # We will use L-BFGS algorithm to optimize. The .backward method dynamically computes gradients
-    optimizer = optim.LBFGS([input_img.requires_grad_()])
+    # Use Adam optimizer
+    optimizer = Adam([input_img.requires_grad_()], lr=1e-2)
 
     print('Optimizing..')
-    run = [0]
-    while run[0] <= num_steps:
-
-        def closure():
-            # Correct the values of updated input image
-            input_img.data.clamp_(0, 1)
-
-            optimizer.zero_grad()
-            model(input_img)
-            style_score = 0
-            content_score = 0
-
-            for sl in style_losses:
-                style_score += sl.loss
-            for cl in content_losses:
-                content_score += cl.loss
-            
-            style_score *= style_weight
-            content_score *= content_weight
-
-            loss = style_score + content_score
-            loss.backward()
-
-            run[0] += 1
-            if run[0] % 50 == 0:
-                print("run {}:".format(run))
-                print('Style Loss : {:4f} Content Loss: {:4f}'.format(style_score.item(), content_score.item()))
-                print()
-
-            return style_score + content_score
-
-        optimizer.step(closure)
-
+    for i in range(num_steps):
+        input_img.data.clamp_(0, 1)
+        optimizer.zero_grad()
+        model(input_img)
+        style_score = sum([sl.loss for sl in style_losses])
+        content_score = sum([cl.loss for cl in content_losses])
+        loss = style_score * style_weight + content_score * content_weight
+        loss.backward()
+        optimizer.step()
+        
+        if i % 50 == 0:
+            print("Step {}:".format(i))
+            print('Style Loss : {:4f} Content Loss: {:4f}'.format(style_score.item(), content_score.item()))
+    
     # a last correction...
     input_img.data.clamp_(0, 1)
 
     return input_img
+
 
 
 # Function to display tensor as image
@@ -218,7 +270,7 @@ def main(content_path, style_path):
     cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
 
     # Load the VGG19 model
-    cnn = models.vgg19(pretrained=True).features.to(device).eval()
+    cnn = vgg19(weights=VGG19_Weights.IMAGENET1K_V1).features.to(device).eval()
 
     # User input for customizing parameters
     try:
